@@ -1,0 +1,6 @@
+{
+  "name": "SubSync",
+  "description": "AI-powered subtitle synchronizer with audio/video hash matching, fuzzy speech alignment, and real-time playback preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

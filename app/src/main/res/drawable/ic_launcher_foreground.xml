@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Subtitle card base outline -->
+    <path
+        android:fillColor="#1E293B"
+        android:pathData="M28,34h52c3.3,0 6,2.7 6,6v28c0,3.3 -2.7,6 -6,6h-52c-3.3,0 -6,-2.7 -6,-6v-28c0,-3.3 2.7,-6 6,-6z" />
+        
+    <!-- Cyan border accent -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M28,34h52c3.3,0 6,2.7 6,6v28c0,3.3 -2.7,6 -6,6h-52c-3.3,0 -6,-2.7 -6,-6v-28c0,-3.3 2.7,-6 6,-6z" />
+        
+    <!-- Sound wave sync bars inside the subtitle frame -->
+    <!-- Bar 1 -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M35,50h3v8h-3z" />
+    <!-- Bar 2 -->
+    <path
+        android:fillColor="#60A5FA"
+        android:pathData="M41,45h3v18h-3z" />
+    <!-- Bar 3 - Peak -->
+    <path
+        android:fillColor="#818CF8"
+        android:pathData="M47,42h3v24h-3z" />
+    <!-- Bar 4 - Peak 2 -->
+    <path
+        android:fillColor="#A78BFA"
+        android:pathData="M53,40h3v28h-3z" />
+    <!-- Bar 5 -->
+    <path
+        android:fillColor="#818CF8"
+        android:pathData="M59,44h3v20h-3z" />
+    <!-- Bar 6 -->
+    <path
+        android:fillColor="#60A5FA"
+        android:pathData="M65,47h3v14h-3z" />
+    <!-- Bar 7 -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M71,51h3v6h-3z" />
+        
+    <!-- Sync badge / sparkle on corner -->
+    <path
+        android:fillColor="#00F0FF"
+        android:pathData="M78,28l2,5l5,2l-5,2l-2,5l-2,-5l-5,-2l5,-2z" />
+</vector>
