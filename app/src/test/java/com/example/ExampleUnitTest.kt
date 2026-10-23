@@ -200,4 +200,73 @@ class ExampleUnitTest {
         val hash = OpenSubtitlesHasher.computeBytesHash(testBytes, testBytes.size.toLong())
         assertEquals(16, hash.length)
     }
+
+    @Test
+    fun testSyllablePhonemeEstimates() {
+        // English sentence
+        val engText = "System diagnostics complete and operational"
+        val engEstimate = com.example.subsync.util.AcousticAlignmentEngine.estimateSyllablesAndPhonemes(engText)
+        assertTrue("English syllables should be >= 10", engEstimate.syllableCount >= 10)
+        assertTrue("Expected duration should be > 1500ms", engEstimate.expectedDurationMs > 1500L)
+
+        // Thai sentence
+        val thaiText = "สวัสดีครับ ยินดีต้อนรับสู่ระบบ"
+        val thaiEstimate = com.example.subsync.util.AcousticAlignmentEngine.estimateSyllablesAndPhonemes(thaiText)
+        assertTrue("Thai syllables should be detected from vowel marks", thaiEstimate.syllableCount >= 5)
+        assertTrue("Expected duration should be adequate", thaiEstimate.expectedDurationMs >= 1000L)
+    }
+
+    @Test
+    fun testAcousticVadSnappingAndTimingRepairs() {
+        // Cue 1 has inverted timestamp (start 5000, end 3000)
+        // Cue 2 has normal timestamp
+        // Cue 3 overlaps with cue 2 (starts at 7500 while cue 2 ends at 8500)
+        val cues = listOf(
+            SubtitleCue(1, 5000L, 3000L, "First line with inverted time"),
+            SubtitleCue(2, 6000L, 8500L, "Second line dialogue"),
+            SubtitleCue(3, 7500L, 11000L, "Third line overlapping dialogue")
+        )
+
+        val boundaries = listOf(
+            com.example.subsync.model.AudioSpeechBoundary(5050L, 5950L, 0.7f, 0.5f),
+            com.example.subsync.model.AudioSpeechBoundary(6200L, 8400L, 0.8f, 0.6f),
+            com.example.subsync.model.AudioSpeechBoundary(8600L, 11200L, 0.75f, 0.55f)
+        )
+
+        val result = com.example.subsync.util.AcousticAlignmentEngine.alignCuesWithAcousticVad(
+            cues = cues,
+            boundaries = boundaries
+        )
+
+        // Verify inverted timestamp was repaired
+        assertTrue("Inverted timestamps should be repaired", result.invertedTimestampsRepaired >= 1)
+        for (cue in result.alignedCues) {
+            assertTrue("Cue ${cue.id} end must be greater than start", cue.endTimeMs > cue.startTimeMs)
+        }
+
+        // Verify sequential cues do not overlap
+        for (i in 0 until result.alignedCues.size - 1) {
+            val curr = result.alignedCues[i]
+            val next = result.alignedCues[i + 1]
+            assertTrue("Cue ${curr.id} must not overlap with Cue ${next.id}", curr.endTimeMs <= next.startTimeMs)
+        }
+    }
+
+    @Test
+    fun testRepairTimingErrorsUtility() {
+        val problematicCues = listOf(
+            SubtitleCue(1, -500L, 2000L, "Negative start"),
+            SubtitleCue(2, 4000L, 3500L, "Inverted timestamp"),
+            SubtitleCue(3, 4200L, 7000L, "Overlaps with cue 2")
+        )
+
+        val (fixedCues, stats) = SubtitleParser.repairTimingErrors(problematicCues)
+        assertEquals(1, stats.clampedNegative)
+        assertEquals(1, stats.invertedFixed)
+        assertTrue(stats.overlapsResolved >= 1)
+
+        assertEquals(0L, fixedCues[0].startTimeMs)
+        assertTrue(fixedCues[1].endTimeMs > fixedCues[1].startTimeMs)
+        assertTrue(fixedCues[1].endTimeMs <= fixedCues[2].startTimeMs)
+    }
 }

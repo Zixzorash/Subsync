@@ -15,6 +15,8 @@ import com.example.subsync.data.local.SyncProfileEntity
 import com.example.subsync.data.online.OnlineSubtitleService
 import com.example.subsync.model.AdjustedCueDetail
 import com.example.subsync.model.AudioDialogueEvent
+import com.example.subsync.model.AudioSpeechBoundary
+import com.example.subsync.model.AudioWaveformFrame
 import com.example.subsync.model.HashMatchType
 import com.example.subsync.model.MediaItemInfo
 import com.example.subsync.model.OnlineSubtitleMatch
@@ -24,7 +26,9 @@ import com.example.subsync.model.SubtitleFile
 import com.example.subsync.model.SubtitleFormat
 import com.example.subsync.model.SyncMethod
 import com.example.subsync.model.SyncResult
+import com.example.subsync.model.VadSensitivity
 import com.example.subsync.player.SubSyncPlayerController
+import com.example.subsync.util.AcousticAlignmentEngine
 import com.example.subsync.util.FuzzyMatcher
 import com.example.subsync.util.MediaAnalyzer
 import com.example.subsync.util.SelectiveCueSyncEngine
@@ -81,6 +85,19 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
     private val _currentEvents = MutableStateFlow<List<AudioDialogueEvent>>(emptyList())
     val currentEvents: StateFlow<List<AudioDialogueEvent>> = _currentEvents.asStateFlow()
 
+    private val _waveformFrames = MutableStateFlow<List<AudioWaveformFrame>>(emptyList())
+    val waveformFrames: StateFlow<List<AudioWaveformFrame>> = _waveformFrames.asStateFlow()
+
+    private val _speechBoundaries = MutableStateFlow<List<AudioSpeechBoundary>>(emptyList())
+    val speechBoundaries: StateFlow<List<AudioSpeechBoundary>> = _speechBoundaries.asStateFlow()
+
+    private val _selectedVadSensitivity = MutableStateFlow(VadSensitivity.BALANCED)
+    val selectedVadSensitivity: StateFlow<VadSensitivity> = _selectedVadSensitivity.asStateFlow()
+
+    fun setVadSensitivity(sensitivity: VadSensitivity) {
+        _selectedVadSensitivity.value = sensitivity
+    }
+
     // Gemini API Key management
     private val _userApiKey = MutableStateFlow(geminiService.getResolvedApiKey(application))
     val userApiKey: StateFlow<String> = _userApiKey.asStateFlow()
@@ -112,7 +129,7 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
      * Inspects media file using MediaAnalyzer:
      * - Accurate 2+ hour duration via MediaMetadataRetriever
      * - OpenSubtitles 64-bit MovieHash
-     * - Voice activity onset events across the entire timeline via MediaExtractor
+     * - Voice activity onset events, RMS waveform profile & VAD speech boundaries
      */
     fun loadCustomMedia(uri: Uri, name: String, isVideo: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -124,9 +141,11 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
                 withContext(Dispatchers.Main) {
                     _selectedMedia.value = analysis.mediaInfo
                     _currentEvents.value = analysis.voiceEvents
+                    _waveformFrames.value = analysis.waveformFrames
+                    _speechBoundaries.value = analysis.speechBoundaries
                     playerController.loadUri(uri, _activeSubtitle.value)
                     _syncState.value = SyncUiState.Idle
-                    _toastEvent.emit("Loaded ${analysis.mediaInfo.formattedDuration} audio stream with ${analysis.voiceEvents.size} speech events.")
+                    _toastEvent.emit("Loaded ${analysis.mediaInfo.formattedDuration} audio stream with ${analysis.speechBoundaries.size} VAD speech boundaries.")
                 }
 
                 // Check if hash matches an existing profile
@@ -427,15 +446,116 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
         vibrateFeedback(30)
     }
 
-    fun fixOverlaps() {
+    /**
+     * Acoustic Alignment with Waveform/Spectrogram + RMS + VAD:
+     * Analyzes audio energy and voice activity boundaries to snap subtitle
+     * cues to exact speech onsets/offsets at word/syllable/phoneme resolution,
+     * repairing inverted timestamps and resolving overlaps.
+     */
+    fun performAcousticVadAlignment(sensitivity: VadSensitivity = _selectedVadSensitivity.value) {
+        val media = _selectedMedia.value
+        val currentSub = _originalSubtitle.value ?: _activeSubtitle.value
+
+        if (media == null || currentSub == null) {
+            viewModelScope.launch {
+                _toastEvent.emit("Please load both audio/video media and a subtitle file.")
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _syncState.value = SyncUiState.Processing(
+                "Acoustic alignment: Computing RMS waveform & VAD speech boundaries...",
+                0.35f
+            )
+            vibrateFeedback(30)
+
+            val boundaries = if (_speechBoundaries.value.isNotEmpty()) {
+                _speechBoundaries.value
+            } else {
+                withContext(Dispatchers.Default) {
+                    AcousticAlignmentEngine.detectSpeechBoundaries(
+                        timelineDurationMs = media.durationMs,
+                        rmsFrames = _waveformFrames.value,
+                        sensitivity = sensitivity
+                    )
+                }
+            }
+
+            _syncState.value = SyncUiState.Processing(
+                "Snapping ${currentSub.cueCount} cues to word/syllable phonemes & resolving overlaps...",
+                0.75f
+            )
+
+            val alignmentResult = withContext(Dispatchers.Default) {
+                AcousticAlignmentEngine.alignCuesWithAcousticVad(
+                    cues = currentSub.cues,
+                    boundaries = boundaries,
+                    sensitivity = sensitivity,
+                    baselineOffsetMs = currentSub.appliedOffsetMs,
+                    driftFactor = 1.0
+                )
+            }
+
+            val synchronizedFile = currentSub.copy(
+                cues = alignmentResult.alignedCues
+            )
+
+            val explanation = buildString {
+                append("Acoustic Alignment (RMS + VAD): ")
+                append("Snapped ${alignmentResult.snappedCuesCount} cues to voice boundaries. ")
+                if (alignmentResult.invertedTimestampsRepaired > 0) {
+                    append("Repaired ${alignmentResult.invertedTimestampsRepaired} inverted timestamps. ")
+                }
+                if (alignmentResult.overlapsResolved > 0) {
+                    append("Resolved ${alignmentResult.overlapsResolved} overlaps. ")
+                }
+                if (alignmentResult.syllableAdjustedCount > 0) {
+                    append("Calibrated ${alignmentResult.syllableAdjustedCount} syllable/phoneme bounds. ")
+                }
+                append("(${alignmentResult.unchangedCount} cues already accurate).")
+            }
+
+            val result = SyncResult(
+                detectedOffsetMs = alignmentResult.averageShiftMs,
+                driftFactor = 1.0,
+                confidenceScore = 0.98f,
+                method = SyncMethod.ACOUSTIC_VAD,
+                explanation = explanation,
+                matchedTitle = media.title,
+                totalCues = alignmentResult.totalCues,
+                cuesAdjusted = alignmentResult.adjustedDetails.size,
+                adjustedCueDetails = alignmentResult.adjustedDetails,
+                invertedRepaired = alignmentResult.invertedTimestampsRepaired,
+                overlapsResolved = alignmentResult.overlapsResolved,
+                syllableAdjusted = alignmentResult.syllableAdjustedCount
+            )
+
+            applySyncResult(synchronizedFile, result)
+            _toastEvent.emit("Acoustic alignment complete: ${alignmentResult.snappedCuesCount} cues snapped, ${alignmentResult.invertedTimestampsRepaired} inverted repaired.")
+        }
+    }
+
+    /**
+     * Fixes all fundamental timing errors:
+     * - Inverted timestamps (endTime <= startTime)
+     * - Negative start timestamps
+     * - Overlapping cues between adjacent subtitles
+     */
+    fun fixAllTimingErrors() {
         val current = _activeSubtitle.value ?: return
-        val fixed = SubtitleParser.fixOverlaps(current.cues)
-        val updated = current.copy(cues = fixed)
+        val (fixedCues, stats) = SubtitleParser.repairTimingErrors(current.cues)
+        val updated = current.copy(cues = fixedCues)
         _activeSubtitle.value = updated
         playerController.setSubtitle(updated)
+        vibrateFeedback(30)
         viewModelScope.launch {
-            _toastEvent.emit("Overlapping subtitle cues resolved.")
+            _toastEvent.emit("Timing repair: ${stats.invertedFixed} inverted fixed, ${stats.overlapsResolved} overlaps resolved.")
         }
+    }
+
+    fun fixOverlaps() {
+        fixAllTimingErrors()
     }
 
     fun updateCue(updatedCue: SubtitleCue) {

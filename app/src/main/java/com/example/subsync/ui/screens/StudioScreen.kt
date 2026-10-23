@@ -28,20 +28,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
+import com.example.subsync.model.VadSensitivity
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -106,6 +110,9 @@ fun StudioScreen(
     val onlineResults by viewModel.onlineSearchResults.collectAsState()
     val isSearchingOnline by viewModel.isSearchingOnline.collectAsState()
     val userApiKey by viewModel.userApiKey.collectAsState()
+    val selectedVadSensitivity by viewModel.selectedVadSensitivity.collectAsState()
+    val waveformFrames by viewModel.waveformFrames.collectAsState()
+    val speechBoundaries by viewModel.speechBoundaries.collectAsState()
 
     var showOnlineSearchCard by remember { mutableStateOf(false) }
     var showAdjustedCuesDialog by remember { mutableStateOf(false) }
@@ -731,30 +738,222 @@ fun StudioScreen(
 
         // Primary Synchronization Actions
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // AI Auto-Sync Button
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                // Acoustic Alignment (Waveform + RMS + VAD) Hero Card
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("acoustic_alignment_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.GraphicEq,
+                                    contentDescription = null,
+                                    tint = NeonCyan,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Acoustic Alignment",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Waveform + RMS + VAD Voice Activity",
+                                        fontSize = 11.sp,
+                                        color = NeonCyan
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = EmeraldSuccess.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = "Word/Syllable Snap",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = EmeraldSuccess,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "Uses RMS energy and VAD speech detection to snap cue start/end times to exact acoustic voice boundaries, resolving inverted times and overlapping cues.",
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            lineHeight = 16.sp
+                        )
+
+                        // VAD Sensitivity Mode Chips
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            VadSensitivity.entries.forEach { sensitivity ->
+                                val isSelected = selectedVadSensitivity == sensitivity
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { viewModel.setVadSensitivity(sensitivity) }
+                                        .border(
+                                            1.dp,
+                                            if (isSelected) NeonCyan else DarkBorder,
+                                            RoundedCornerShape(8.dp)
+                                        ),
+                                    color = if (isSelected) NeonCyan.copy(alpha = 0.15f) else DarkSurfaceVariant
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text(
+                                            text = sensitivity.label,
+                                            fontSize = 10.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isSelected) NeonCyan else TextSecondary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Mini Waveform & Speech Zones Canvas Visualizer
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF090D16)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val barCount = 36
+                                    for (i in 0 until barCount) {
+                                        val frameIndex = if (waveformFrames.isNotEmpty()) {
+                                            (i * waveformFrames.size / barCount).coerceIn(0, waveformFrames.size - 1)
+                                        } else null
+                                        val frame = frameIndex?.let { waveformFrames[it] }
+                                        val heightFrac = frame?.rms?.coerceIn(0.15f, 1.0f)
+                                            ?: ((0.2f + ((i * 7) % 10) / 14f).coerceIn(0.2f, 0.9f))
+                                        val isVoiced = frame?.isVoiceActive ?: (i % 5 in 1..3)
+
+                                        Box(
+                                            modifier = Modifier
+                                                .width(4.dp)
+                                                .fillMaxHeight(heightFrac)
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(
+                                                    if (isVoiced) NeonCyan else Color(0xFF334155)
+                                                )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Main Action: Acoustic Align & Snap Button
+                        Button(
+                            onClick = { viewModel.performAcousticVadAlignment() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp)
+                                .testTag("acoustic_vad_align_button"),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NeonCyan,
+                                contentColor = Color(0xFF090D16)
+                            ),
+                            enabled = syncState !is SyncUiState.Processing
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Acoustic Align & Snap (RMS + VAD)",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        // Quick Fix Timing Errors (Inverted & Overlaps)
+                        OutlinedButton(
+                            onClick = { viewModel.fixAllTimingErrors() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(42.dp)
+                                .testTag("quick_fix_timing_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldSuccess.copy(alpha = 0.5f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Build,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = EmeraldSuccess
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Fix Timing Errors (Inverted & Overlaps)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = EmeraldSuccess
+                            )
+                        }
+                    }
+                }
+
+                // AI Auto-Sync Button (Gemini)
                 Button(
                     onClick = { viewModel.performAiAutoSync() },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(48.dp)
                         .testTag("ai_auto_sync_button"),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NeonCyan,
-                        contentColor = Color(0xFF090D16)
+                        containerColor = ElectricIndigo,
+                        contentColor = Color.White
                     ),
                     enabled = syncState !is SyncUiState.Processing
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "AI Selective Auto-Sync (Gemini)",
-                        fontSize = 15.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -764,24 +963,24 @@ fun StudioScreen(
                     onClick = { viewModel.performFuzzySync() },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(44.dp)
                         .testTag("fuzzy_sync_button"),
-                    shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricIndigo),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
                     enabled = syncState !is SyncUiState.Processing
                 ) {
                     Icon(
                         imageVector = Icons.Default.Sync,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = ElectricIndigo
+                        modifier = Modifier.size(16.dp),
+                        tint = TextSecondary
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Selective Speech Consensus (Offline)",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = ElectricIndigo
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = TextSecondary
                     )
                 }
             }
@@ -929,6 +1128,33 @@ fun StudioScreen(
                                             text = "Drift: ${String.format(Locale.US, "%.4f", result.driftFactor)}x",
                                             fontSize = 10.sp,
                                             color = TextSecondary
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (result.invertedRepaired > 0 || result.overlapsResolved > 0 || result.syllableAdjusted > 0) {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = DarkSurface
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Build,
+                                            contentDescription = null,
+                                            tint = EmeraldSuccess,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "Repairs: ${result.invertedRepaired} Inverted Times Fixed • ${result.overlapsResolved} Overlaps Resolved • ${result.syllableAdjusted} Syllable Durations Calibrated",
+                                            fontSize = 11.sp,
+                                            color = EmeraldSuccess,
+                                            fontWeight = FontWeight.Medium
                                         )
                                     }
                                 }

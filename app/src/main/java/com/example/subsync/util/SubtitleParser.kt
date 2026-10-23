@@ -264,21 +264,60 @@ object SubtitleParser {
         }
     }
 
-    fun fixOverlaps(cues: List<SubtitleCue>, minGapMs: Long = 50L): List<SubtitleCue> {
-        val sorted = cues.sortedBy { it.startTimeMs }
+    data class TimingRepairStats(
+        val invertedFixed: Int,
+        val overlapsResolved: Int,
+        val clampedNegative: Int
+    )
+
+    fun repairTimingErrors(cues: List<SubtitleCue>, minGapMs: Long = 50L): Pair<List<SubtitleCue>, TimingRepairStats> {
+        var invertedCount = 0
+        var clampedCount = 0
+        var overlapCount = 0
+
+        // 1. Sanitize individual cues: clamp negative starts and repair inverted end times
+        val sanitized = cues.map { cue ->
+            var start = cue.startTimeMs
+            var end = cue.endTimeMs
+
+            if (start < 0L) {
+                start = 0L
+                clampedCount++
+            }
+
+            if (end <= start) {
+                invertedCount++
+                val phonemeEst = AcousticAlignmentEngine.estimateSyllablesAndPhonemes(cue.text)
+                end = start + phonemeEst.expectedDurationMs
+            }
+
+            if (start != cue.startTimeMs || end != cue.endTimeMs) {
+                cue.copy(startTimeMs = start, endTimeMs = end)
+            } else {
+                cue
+            }
+        }.sortedBy { it.startTimeMs }
+
+        // 2. Resolve sequential overlaps
         val result = mutableListOf<SubtitleCue>()
-        for (i in sorted.indices) {
-            val current = sorted[i]
+        for (i in sanitized.indices) {
+            val current = sanitized[i]
             if (i > 0) {
                 val prev = result[i - 1]
                 if (prev.endTimeMs + minGapMs > current.startTimeMs) {
+                    overlapCount++
                     val adjustedPrevEnd = (current.startTimeMs - minGapMs).coerceAtLeast(prev.startTimeMs + 200L)
                     result[i - 1] = prev.copy(endTimeMs = adjustedPrevEnd)
                 }
             }
             result.add(current)
         }
-        return result
+
+        return Pair(result, TimingRepairStats(invertedCount, overlapCount, clampedCount))
+    }
+
+    fun fixOverlaps(cues: List<SubtitleCue>, minGapMs: Long = 50L): List<SubtitleCue> {
+        return repairTimingErrors(cues, minGapMs).first
     }
 
     fun formatSrtTime(ms: Long): String {

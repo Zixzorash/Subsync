@@ -104,9 +104,40 @@ enum class SyncMethod(val displayName: String) {
     FUZZY_SPEECH("Fuzzy Speech Match"),
     AI_GEMINI("Gemini AI Auto-Sync"),
     SELECTIVE_CUE("Selective AI Alignment"),
+    ACOUSTIC_VAD("Acoustic Alignment (Waveform + RMS + VAD)"),
     ONLINE_DATABASE("Online Database Sync"),
     MANUAL("Manual Calibration")
 }
+
+enum class VadSensitivity(
+    val label: String,
+    val description: String,
+    val energyThresholdMultiplier: Float,
+    val minSpeechDurationMs: Long,
+    val hangoverMs: Long
+) {
+    HIGH_PRECISION("High Precision", "Snaps closely to quick syllables & word onsets", 2.2f, 80L, 120L),
+    BALANCED("Balanced (RMS)", "Standard VAD boundary speech alignment", 1.8f, 120L, 160L),
+    AGGRESSIVE("Wide Capture", "Captures whisper & soft phoneme tails", 1.4f, 60L, 200L)
+}
+
+data class AudioSpeechBoundary(
+    val startMs: Long,
+    val endMs: Long,
+    val rmsPeak: Float,
+    val energyLevel: Float,
+    val dominantFreqCategory: String = "Voiced Speech"
+) {
+    val durationMs: Long get() = endMs - startMs
+    fun formatStart(): String = SubtitleCue.formatTimestamp(startMs)
+    fun formatEnd(): String = SubtitleCue.formatTimestamp(endMs)
+}
+
+data class AudioWaveformFrame(
+    val timestampMs: Long,
+    val rms: Float,
+    val isVoiceActive: Boolean = false
+)
 
 data class SyncResult(
     val detectedOffsetMs: Long,
@@ -118,6 +149,9 @@ data class SyncResult(
     val totalCues: Int = 0,
     val cuesAdjusted: Int = 0,
     val adjustedCueDetails: List<AdjustedCueDetail> = emptyList(),
+    val invertedRepaired: Int = 0,
+    val overlapsResolved: Int = 0,
+    val syllableAdjusted: Int = 0,
     val timestamp: Long = System.currentTimeMillis()
 )
 

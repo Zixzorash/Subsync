@@ -172,10 +172,10 @@ fun EditorScreen(
 
             ToolChip(
                 icon = Icons.Default.AutoFixHigh,
-                label = "Fix Overlaps",
+                label = "Fix Errors",
                 modifier = Modifier.weight(1f)
             ) {
-                viewModel.fixOverlaps()
+                viewModel.fixAllTimingErrors()
             }
         }
 

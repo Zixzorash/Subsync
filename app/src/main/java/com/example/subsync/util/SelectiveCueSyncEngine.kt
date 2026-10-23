@@ -45,15 +45,20 @@ object SelectiveCueSyncEngine {
         for (cue in cues) {
             val originalStart = cue.startTimeMs
             val originalEnd = cue.endTimeMs
-            val duration = originalEnd - originalStart
+            val phonemeEstimate = AcousticAlignmentEngine.estimateSyllablesAndPhonemes(cue.text)
+            val duration = if (originalEnd <= originalStart) {
+                phonemeEstimate.expectedDurationMs
+            } else {
+                originalEnd - originalStart
+            }
 
             // Find nearest speech event to original timestamp
             val nearestSpeech = findNearestSpeechTime(originalStart, speechTimes)
 
             val currentError = if (nearestSpeech != null) abs(originalStart - nearestSpeech) else Long.MAX_VALUE
 
-            // 1. Check if the cue is ALREADY in sync with the audio voice
-            if (currentError <= toleranceMs) {
+            // 1. Check if the cue is ALREADY in sync with the audio voice and not inverted
+            if (currentError <= toleranceMs && originalEnd > originalStart) {
                 // Cue is already aligned with voice activity! Keep untouched.
                 resultCues.add(cue)
                 continue
