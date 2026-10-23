@@ -12,10 +12,13 @@ import androidx.lifecycle.viewModelScope
 import com.example.subsync.ai.GeminiSubtitleService
 import com.example.subsync.data.local.SubSyncDatabase
 import com.example.subsync.data.local.SyncProfileEntity
-import com.example.subsync.data.sample.SampleMediaProvider
-import com.example.subsync.data.sample.SamplePreset
+import com.example.subsync.data.online.OnlineSubtitleService
+import com.example.subsync.model.AdjustedCueDetail
 import com.example.subsync.model.AudioDialogueEvent
+import com.example.subsync.model.HashMatchType
 import com.example.subsync.model.MediaItemInfo
+import com.example.subsync.model.OnlineSubtitleMatch
+import com.example.subsync.model.OnlineSubtitleSource
 import com.example.subsync.model.SubtitleCue
 import com.example.subsync.model.SubtitleFile
 import com.example.subsync.model.SubtitleFormat
@@ -23,9 +26,11 @@ import com.example.subsync.model.SyncMethod
 import com.example.subsync.model.SyncResult
 import com.example.subsync.player.SubSyncPlayerController
 import com.example.subsync.util.FuzzyMatcher
-import com.example.subsync.util.OpenSubtitlesHasher
+import com.example.subsync.util.MediaAnalyzer
+import com.example.subsync.util.SelectiveCueSyncEngine
 import com.example.subsync.util.SubtitleParser
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -36,12 +41,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.example.subsync.data.online.OnlineSubtitleService
-import com.example.subsync.model.HashMatchType
-import com.example.subsync.model.OnlineSubtitleMatch
-import com.example.subsync.model.OnlineSubtitleSource
-import kotlinx.coroutines.delay
-import java.io.File
+import java.util.Locale
 
 sealed interface SyncUiState {
     data object Idle : SyncUiState
@@ -68,7 +68,7 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
     private val _isSearchingOnline = MutableStateFlow(false)
     val isSearchingOnline: StateFlow<Boolean> = _isSearchingOnline.asStateFlow()
 
-    // Currently active media and subtitle
+    // Currently active media and subtitle (Starts clean with no sample presets)
     private val _selectedMedia = MutableStateFlow<MediaItemInfo?>(null)
     val selectedMedia: StateFlow<MediaItemInfo?> = _selectedMedia.asStateFlow()
 
@@ -81,6 +81,10 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
     private val _currentEvents = MutableStateFlow<List<AudioDialogueEvent>>(emptyList())
     val currentEvents: StateFlow<List<AudioDialogueEvent>> = _currentEvents.asStateFlow()
 
+    // Gemini API Key management
+    private val _userApiKey = MutableStateFlow(geminiService.getResolvedApiKey(application))
+    val userApiKey: StateFlow<String> = _userApiKey.asStateFlow()
+
     // Sync State & Result
     private val _syncState = MutableStateFlow<SyncUiState>(SyncUiState.Idle)
     val syncState: StateFlow<SyncUiState> = _syncState.asStateFlow()
@@ -91,94 +95,49 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
     private val _toastEvent = MutableSharedFlow<String>()
     val toastEvent: SharedFlow<String> = _toastEvent.asSharedFlow()
 
-    init {
-        // Pre-populate with first preset so the user sees immediate rich content
-        loadPreset(SampleMediaProvider.PRESET_SCI_FI)
-        seedKnownProfilesIfEmpty()
-    }
-
-    private fun seedKnownProfilesIfEmpty() {
-        viewModelScope.launch(Dispatchers.IO) {
-            SampleMediaProvider.ALL_PRESETS.forEach { preset ->
-                val existing = profileDao.findByOpenSubtitlesHash(preset.media.openSubtitlesHash)
-                if (existing == null) {
-                    profileDao.insertProfile(
-                        SyncProfileEntity(
-                            mediaTitle = preset.media.title,
-                            openSubtitlesHash = preset.media.openSubtitlesHash,
-                            sha256Hash = preset.media.sha256Hash,
-                            subtitleTitle = preset.unsyncedSubtitle.title,
-                            calibratedOffsetMs = preset.groundTruthOffsetMs,
-                            driftFactor = preset.groundTruthDrift,
-                            confidencePercent = 99,
-                            syncMethod = "MovieHash Registry",
-                            cueCount = preset.unsyncedSubtitle.cueCount,
-                            mediaDurationMs = preset.media.durationMs
-                        )
-                    )
-                }
+    fun saveApiKey(key: String) {
+        val trimmed = key.trim()
+        geminiService.saveCustomApiKey(getApplication(), trimmed)
+        _userApiKey.value = trimmed
+        viewModelScope.launch {
+            if (trimmed.isNotBlank()) {
+                _toastEvent.emit("Gemini API Key saved successfully.")
+            } else {
+                _toastEvent.emit("Gemini API Key cleared.")
             }
         }
     }
 
-    fun loadPreset(preset: SamplePreset) {
-        _selectedMedia.value = preset.media
-        _originalSubtitle.value = preset.unsyncedSubtitle
-        _activeSubtitle.value = preset.unsyncedSubtitle
-        _currentEvents.value = preset.groundTruthEvents
-        _lastSyncResult.value = null
-        _syncState.value = SyncUiState.Idle
-
-        // Load playable WAV file into player
-        viewModelScope.launch(Dispatchers.IO) {
-            val wavFile = SampleMediaProvider.createSampleWavFile(getApplication(), preset)
-            withContext(Dispatchers.Main) {
-                playerController.loadFile(wavFile, preset.unsyncedSubtitle)
-            }
-        }
-    }
-
+    /**
+     * Inspects media file using MediaAnalyzer:
+     * - Accurate 2+ hour duration via MediaMetadataRetriever
+     * - OpenSubtitles 64-bit MovieHash
+     * - Voice activity onset events across the entire timeline via MediaExtractor
+     */
     fun loadCustomMedia(uri: Uri, name: String, isVideo: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
-            _syncState.value = SyncUiState.Processing("Computing MovieHash & audio fingerprint...", 0.2f)
+            _syncState.value = SyncUiState.Processing("Extracting audio stream & computing MovieHash...", 0.25f)
             try {
                 val context = getApplication<Application>()
-                var fileSize = 0L
-                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                    fileSize = pfd.statSize
-                }
-
-                val hash = context.contentResolver.openInputStream(uri)?.use { stream ->
-                    val buffer = ByteArray(65536)
-                    val read = stream.read(buffer)
-                    if (read > 0) OpenSubtitlesHasher.computeBytesHash(buffer.copyOf(read), fileSize)
-                    else "0000000000000000"
-                } ?: "0000000000000000"
-
-                val media = MediaItemInfo(
-                    title = name,
-                    uriString = uri.toString(),
-                    isSample = false,
-                    durationMs = 60000L,
-                    fileSizeBytes = fileSize,
-                    openSubtitlesHash = hash,
-                    sha256Hash = hash.reversed(),
-                    isVideo = isVideo
-                )
+                val analysis = MediaAnalyzer.analyze(context, uri, name, isVideo)
 
                 withContext(Dispatchers.Main) {
-                    _selectedMedia.value = media
+                    _selectedMedia.value = analysis.mediaInfo
+                    _currentEvents.value = analysis.voiceEvents
                     playerController.loadUri(uri, _activeSubtitle.value)
                     _syncState.value = SyncUiState.Idle
+                    _toastEvent.emit("Loaded ${analysis.mediaInfo.formattedDuration} audio stream with ${analysis.voiceEvents.size} speech events.")
                 }
 
                 // Check if hash matches an existing profile
-                val known = profileDao.findByOpenSubtitlesHash(hash)
+                val known = profileDao.findByOpenSubtitlesHash(analysis.mediaInfo.openSubtitlesHash)
                 if (known != null) {
-                    _toastEvent.emit("Found saved sync profile for hash $hash! (${known.calibratedOffsetMs}ms)")
+                    _toastEvent.emit("Found saved sync profile for hash ${analysis.mediaInfo.openSubtitlesHash}! (${known.calibratedOffsetMs}ms)")
                 }
             } catch (e: Exception) {
-                _syncState.value = SyncUiState.Error("Error inspecting media file: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    _syncState.value = SyncUiState.Error("Error inspecting media file: ${e.message}")
+                }
             }
         }
     }
@@ -194,24 +153,45 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
                     _originalSubtitle.value = parsed
                     _activeSubtitle.value = parsed
                     playerController.setSubtitle(parsed)
-                    _toastEvent.emit("Loaded ${parsed.cueCount} subtitle cues.")
+                    _lastSyncResult.value = null
+                    _toastEvent.emit("Loaded ${parsed.cueCount} subtitle cues (${parsed.format.displayName}).")
                 }
             } catch (e: Exception) {
-                _syncState.value = SyncUiState.Error("Failed to parse subtitle file: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    _syncState.value = SyncUiState.Error("Failed to parse subtitle file: ${e.message}")
+                }
             }
         }
     }
 
     /**
-     * AI Auto-Sync: Uses Gemini AI or Fuzzy logic to detect and calibrate subtitle offset.
+     * AI Auto-Sync (Gemini AI + Selective Cue Alignment):
+     * 1. Check MovieHash database for exact matches
+     * 2. Call Gemini 3.5 Flash to compute baseline offset & drift across the 2-hour timeline
+     * 3. Selectively adjust ONLY cues that are out of sync, preserving correctly-aligned cues
+     * 4. Reports total cues, cues adjusted, and detailed list of all adjusted cues
      */
     fun performAiAutoSync() {
-        val media = _selectedMedia.value ?: return
-        val currentSub = _originalSubtitle.value ?: return
+        val media = _selectedMedia.value
+        val currentSub = _originalSubtitle.value
+
+        if (media == null) {
+            viewModelScope.launch {
+                _toastEvent.emit("Please import an audio or video file first.")
+            }
+            return
+        }
+        if (currentSub == null) {
+            viewModelScope.launch {
+                _toastEvent.emit("Please import or search for a subtitle file first.")
+            }
+            return
+        }
+
         val events = _currentEvents.value
 
         viewModelScope.launch {
-            _syncState.value = SyncUiState.Processing("Extracting speech timing & computing hash...", 0.3f)
+            _syncState.value = SyncUiState.Processing("Extracting speech timing & computing hash...", 0.2f)
             vibrateFeedback(30)
 
             // Step 1: Check Hash database for instant exact match
@@ -220,97 +200,173 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
             }
 
             if (cachedProfile != null && cachedProfile.openSubtitlesHash == media.openSubtitlesHash) {
-                _syncState.value = SyncUiState.Processing("Matched MovieHash registry! Applying offset...", 0.8f)
-                kotlinx.coroutines.delay(400) // smooth visual feedback
+                _syncState.value = SyncUiState.Processing("Matched MovieHash registry! Applying selective alignment...", 0.6f)
+                delay(300)
+
+                val output = SelectiveCueSyncEngine.synchronizeSelective(
+                    cues = currentSub.cues,
+                    speechEvents = events,
+                    baselineOffsetMs = cachedProfile.calibratedOffsetMs,
+                    driftFactor = cachedProfile.driftFactor
+                )
+
+                val synchronizedFile = currentSub.copy(
+                    cues = output.synchronizedCues,
+                    appliedOffsetMs = cachedProfile.calibratedOffsetMs
+                )
 
                 val result = SyncResult(
                     detectedOffsetMs = cachedProfile.calibratedOffsetMs,
                     driftFactor = cachedProfile.driftFactor,
                     confidenceScore = (cachedProfile.confidencePercent / 100f).coerceIn(0.9f, 0.99f),
                     method = SyncMethod.AUDIO_HASH,
-                    explanation = "Exact OpenSubtitles hash match (${media.openSubtitlesHash}). Applied calibrated offset.",
+                    explanation = "Exact MovieHash match (${media.openSubtitlesHash}). Selectively adjusted ${output.adjustedCount} of ${output.totalCues} cues (${output.unchangedCount} already in sync).",
                     matchedTitle = cachedProfile.mediaTitle,
-                    cuesAdjusted = currentSub.cueCount
+                    totalCues = output.totalCues,
+                    cuesAdjusted = output.adjustedCount,
+                    adjustedCueDetails = output.adjustedDetails
                 )
-                applySyncResult(result)
+
+                applySyncResult(synchronizedFile, result)
                 return@launch
             }
 
             // Step 2: Try Gemini AI
-            _syncState.value = SyncUiState.Processing("AI analyzing dialogue cadence & detecting drift...", 0.6f)
-            val aiResult = geminiService.analyzeAndSynchronize(media, currentSub, events)
+            _syncState.value = SyncUiState.Processing("AI analyzing dialogue cadence & detecting drift across timeline...", 0.5f)
+            val aiResult = geminiService.analyzeAndSynchronize(
+                context = getApplication(),
+                media = media,
+                subtitle = currentSub,
+                speechEvents = events
+            )
 
             if (aiResult.isSuccess) {
-                val result = aiResult.getOrThrow()
-                applySyncResult(result)
+                val (offset, drift) = aiResult.getOrThrow()
+                _syncState.value = SyncUiState.Processing("Gemini AI detected ${offset}ms offset. Performing selective cue alignment...", 0.8f)
+
+                val output = SelectiveCueSyncEngine.synchronizeSelective(
+                    cues = currentSub.cues,
+                    speechEvents = events,
+                    baselineOffsetMs = offset,
+                    driftFactor = drift
+                )
+
+                val synchronizedFile = currentSub.copy(
+                    cues = output.synchronizedCues,
+                    appliedOffsetMs = offset
+                )
+
+                val result = SyncResult(
+                    detectedOffsetMs = offset,
+                    driftFactor = drift,
+                    confidenceScore = 0.96f,
+                    method = SyncMethod.AI_GEMINI,
+                    explanation = "Gemini AI calculated ${offset}ms baseline offset (drift ${String.format(Locale.US, "%.4f", drift)}). Selectively adjusted ${output.adjustedCount} of ${output.totalCues} cues (${output.unchangedCount} already aligned).",
+                    matchedTitle = media.title,
+                    totalCues = output.totalCues,
+                    cuesAdjusted = output.adjustedCount,
+                    adjustedCueDetails = output.adjustedDetails
+                )
+
+                applySyncResult(synchronizedFile, result)
             } else {
-                // Step 3: High-accuracy Fallback to algorithmic Fuzzy Speech Alignment
-                _syncState.value = SyncUiState.Processing("Running offline Fuzzy Matcher & speech alignment...", 0.75f)
+                val errorMsg = aiResult.exceptionOrNull()?.message ?: "AI failed"
+                // Step 3: Algorithmic Fuzzy Speech Alignment fallback
+                _syncState.value = SyncUiState.Processing("Running offline Selective Speech Alignment fallback...", 0.7f)
+
                 val (offset, confidence) = withContext(Dispatchers.Default) {
                     FuzzyMatcher.computeFuzzyAlignmentOffset(currentSub.cues, events)
                 }
+
+                val output = SelectiveCueSyncEngine.synchronizeSelective(
+                    cues = currentSub.cues,
+                    speechEvents = events,
+                    baselineOffsetMs = offset,
+                    driftFactor = 1.0
+                )
+
+                val synchronizedFile = currentSub.copy(
+                    cues = output.synchronizedCues,
+                    appliedOffsetMs = offset
+                )
 
                 val result = SyncResult(
                     detectedOffsetMs = offset,
                     driftFactor = 1.0,
                     confidenceScore = confidence,
-                    method = SyncMethod.FUZZY_SPEECH,
-                    explanation = "Fuzzy text & speech event consensus detected optimal alignment at ${offset}ms.",
+                    method = SyncMethod.SELECTIVE_CUE,
+                    explanation = "Selective alignment consensus (${errorMsg.take(40)}...). Adjusted ${output.adjustedCount} of ${output.totalCues} cues (${output.unchangedCount} already aligned).",
                     matchedTitle = media.title,
-                    cuesAdjusted = currentSub.cueCount
+                    totalCues = output.totalCues,
+                    cuesAdjusted = output.adjustedCount,
+                    adjustedCueDetails = output.adjustedDetails
                 )
-                applySyncResult(result)
+
+                applySyncResult(synchronizedFile, result)
             }
         }
     }
 
     /**
-     * Pure Offline Fuzzy Synchronization
+     * Pure Selective Fuzzy Synchronization:
+     * Aligns only the cues that diverge from voice audio events.
      */
     fun performFuzzySync() {
-        val media = _selectedMedia.value ?: return
-        val currentSub = _originalSubtitle.value ?: return
+        val media = _selectedMedia.value
+        val currentSub = _originalSubtitle.value
+
+        if (media == null || currentSub == null) {
+            viewModelScope.launch {
+                _toastEvent.emit("Please load both a media stream and a subtitle file.")
+            }
+            return
+        }
         val events = _currentEvents.value
 
         viewModelScope.launch {
-            _syncState.value = SyncUiState.Processing("Calculating Levenshtein token alignment...", 0.5f)
+            _syncState.value = SyncUiState.Processing("Calculating selective speech correlation...", 0.5f)
             vibrateFeedback(30)
 
             val (offset, confidence) = withContext(Dispatchers.Default) {
                 FuzzyMatcher.computeFuzzyAlignmentOffset(currentSub.cues, events)
             }
 
+            val output = SelectiveCueSyncEngine.synchronizeSelective(
+                cues = currentSub.cues,
+                speechEvents = events,
+                baselineOffsetMs = offset,
+                driftFactor = 1.0
+            )
+
+            val synchronizedFile = currentSub.copy(
+                cues = output.synchronizedCues,
+                appliedOffsetMs = offset
+            )
+
             val result = SyncResult(
                 detectedOffsetMs = offset,
                 driftFactor = 1.0,
                 confidenceScore = confidence,
                 method = SyncMethod.FUZZY_SPEECH,
-                explanation = "Matched subtitle cues against speech events using token sorting & sliding window correlation.",
+                explanation = "Speech correlation consensus. Selectively adjusted ${output.adjustedCount} of ${output.totalCues} cues (${output.unchangedCount} already aligned).",
                 matchedTitle = media.title,
-                cuesAdjusted = currentSub.cueCount
+                totalCues = output.totalCues,
+                cuesAdjusted = output.adjustedCount,
+                adjustedCueDetails = output.adjustedDetails
             )
-            applySyncResult(result)
+
+            applySyncResult(synchronizedFile, result)
         }
     }
 
-    private fun applySyncResult(result: SyncResult) {
-        val base = _originalSubtitle.value ?: return
-        var shifted = SubtitleParser.shiftTimestamps(base.cues, result.detectedOffsetMs)
-        if (result.driftFactor != 1.0) {
-            shifted = SubtitleParser.scaleSpeed(shifted, result.driftFactor)
-        }
-        val synchronizedFile = base.copy(
-            cues = shifted,
-            appliedOffsetMs = result.detectedOffsetMs
-        )
-
+    private fun applySyncResult(synchronizedFile: SubtitleFile, result: SyncResult) {
         _activeSubtitle.value = synchronizedFile
         _lastSyncResult.value = result
         _syncState.value = SyncUiState.Success(result)
         playerController.setSubtitle(synchronizedFile)
         vibrateFeedback(60)
 
-        // Auto-save to Room database
+        // Auto-save profile to Room database
         viewModelScope.launch(Dispatchers.IO) {
             _selectedMedia.value?.let { media ->
                 profileDao.insertProfile(
@@ -328,6 +384,19 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
                     )
                 )
             }
+        }
+    }
+
+    /**
+     * Reverts to original unadjusted subtitle cues
+     */
+    fun revertToOriginal() {
+        val orig = _originalSubtitle.value ?: return
+        _activeSubtitle.value = orig
+        _lastSyncResult.value = null
+        playerController.setSubtitle(orig)
+        viewModelScope.launch {
+            _toastEvent.emit("Reverted to original subtitle cues.")
         }
     }
 
@@ -402,7 +471,13 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
         source: OnlineSubtitleSource? = null,
         format: SubtitleFormat? = null
     ) {
-        val media = _selectedMedia.value ?: return
+        val media = _selectedMedia.value
+        if (media == null) {
+            viewModelScope.launch {
+                _toastEvent.emit("Please import a media file first to search subtitles.")
+            }
+            return
+        }
         viewModelScope.launch {
             _isSearchingOnline.value = true
             try {
@@ -446,9 +521,16 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
                         0.75f
                     )
                     delay(250)
-                    val shifted = SubtitleParser.shiftTimestamps(parsed.cues, match.recommendedOffsetMs)
+
+                    val output = SelectiveCueSyncEngine.synchronizeSelective(
+                        cues = parsed.cues,
+                        speechEvents = _currentEvents.value,
+                        baselineOffsetMs = match.recommendedOffsetMs,
+                        driftFactor = 1.0
+                    )
+
                     val synchronizedFile = parsed.copy(
-                        cues = shifted,
+                        cues = output.synchronizedCues,
                         appliedOffsetMs = match.recommendedOffsetMs
                     )
                     _activeSubtitle.value = synchronizedFile
@@ -459,9 +541,11 @@ class SubSyncViewModel(application: Application) : AndroidViewModel(application)
                         driftFactor = 1.0,
                         confidenceScore = if (match.matchType == HashMatchType.EXACT_MOVIE_HASH) 0.99f else 0.92f,
                         method = SyncMethod.ONLINE_DATABASE,
-                        explanation = "Matched via ${match.source.displayName} (${match.matchType.label}). Calibrated against video hash.",
+                        explanation = "Matched via ${match.source.displayName} (${match.matchType.label}). Selectively adjusted ${output.adjustedCount} of ${output.totalCues} cues.",
                         matchedTitle = match.releaseTitle,
-                        cuesAdjusted = synchronizedFile.cueCount
+                        totalCues = output.totalCues,
+                        cuesAdjusted = output.adjustedCount,
+                        adjustedCueDetails = output.adjustedDetails
                     )
                     _lastSyncResult.value = syncResult
                     _syncState.value = SyncUiState.Success(syncResult)

@@ -432,8 +432,13 @@ private fun NudgeButton(
 
 private fun formatTime(ms: Long): String {
     val totalSec = ms / 1000
-    val min = totalSec / 60
+    val hr = totalSec / 3600
+    val min = (totalSec % 3600) / 60
     val sec = totalSec % 60
     val millis = (ms % 1000) / 100
-    return String.format(Locale.US, "%02d:%02d.%01d", min, sec, millis)
+    return if (hr > 0) {
+        String.format(Locale.US, "%02d:%02d:%02d.%01d", hr, min, sec, millis)
+    } else {
+        String.format(Locale.US, "%02d:%02d.%01d", min, sec, millis)
+    }
 }

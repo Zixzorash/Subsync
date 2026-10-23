@@ -1,5 +1,6 @@
 package com.example.subsync.ai
 
+import android.content.Context
 import android.util.Log
 import com.example.BuildConfig
 import com.example.subsync.model.AudioDialogueEvent
@@ -21,61 +22,95 @@ import java.util.concurrent.TimeUnit
 class GeminiSubtitleService {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(45, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(45, TimeUnit.SECONDS)
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     /**
-     * Uses Gemini 3.5 Flash to analyze subtitle cues against audio speech timestamps
-     * and compute millisecond offset, drift factor, and sync explanation.
+     * Resolves the active API key from:
+     * 1. User-configured custom key in SharedPreferences
+     * 2. BuildConfig.GEMINI_API_KEY
+     */
+    fun getResolvedApiKey(context: Context): String {
+        val prefs = context.getSharedPreferences("subsync_prefs", Context.MODE_PRIVATE)
+        val customKey = prefs.getString("user_gemini_api_key", "")?.trim().orEmpty()
+        if (customKey.isNotBlank()) {
+            return customKey
+        }
+        val buildKey = BuildConfig.GEMINI_API_KEY.trim()
+        return if (buildKey != "MY_GEMINI_API_KEY") buildKey else ""
+    }
+
+    fun saveCustomApiKey(context: Context, key: String) {
+        val prefs = context.getSharedPreferences("subsync_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("user_gemini_api_key", key.trim()).apply()
+    }
+
+    /**
+     * Uses Gemini 3.5 Flash to analyze subtitle cues across the entire media timeline
+     * (handling 2+ hours and thousands of cues by multi-segment anchor sampling).
      */
     suspend fun analyzeAndSynchronize(
+        context: Context,
         media: MediaItemInfo,
         subtitle: SubtitleFile,
         speechEvents: List<AudioDialogueEvent>
-    ): Result<SyncResult> = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
-            return@withContext Result.failure(IllegalStateException("No valid GEMINI_API_KEY configured in Secrets panel."))
+    ): Result<Pair<Long, Double>> = withContext(Dispatchers.IO) {
+        val apiKey = getResolvedApiKey(context)
+        if (apiKey.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("No valid GEMINI_API_KEY provided."))
         }
 
         try {
-            val cuesPreview = subtitle.cues.take(8).joinToString("\n") { cue ->
-                "- [${cue.startTimeMs}ms - ${cue.endTimeMs}ms]: \"${cue.text}\""
+            // Sample anchor cues distributed across the timeline (beginning, 20%, 40%, 60%, 80%, end)
+            val cueCount = subtitle.cues.size
+            val sampledCues = if (cueCount <= 12) {
+                subtitle.cues
+            } else {
+                val step = cueCount / 10
+                (0 until 10).mapNotNull { idx -> subtitle.cues.getOrNull(idx * step) }
             }
 
-            val speechPreview = speechEvents.take(8).joinToString("\n") { event ->
-                "- [${event.approximateTimeMs}ms]: \"${event.recognizedPhrase}\""
+            val cuesPreview = sampledCues.joinToString("\n") { cue ->
+                "- Cue #${cue.id} [${cue.formatStartTime()} (${cue.startTimeMs}ms)]: \"${cue.text.take(45)}\""
             }
+
+            // Sample voice events matching sampled cue timeframes
+            val speechPreview = sampledCues.mapNotNull { cue ->
+                speechEvents.minByOrNull { kotlin.math.abs(it.approximateTimeMs - cue.startTimeMs) }
+            }.distinct().take(10).joinToString("\n") { event ->
+                "- Speech onset @ ${event.approximateTimeMs}ms (Energy: ${event.audioEnergy})"
+            }
+
+            val durationMinutes = media.durationMs / 60000L
 
             val prompt = """
                 You are SubSync AI, an expert audio-visual subtitle synchronization engineer.
-                Analyze the following media metadata, dialogue speech events, and desynchronized subtitle cues.
+                Analyze the following media metadata, dialogue speech events, and subtitle cues across a ${durationMinutes}-minute media file with ${cueCount} total cues.
                 
                 Media:
                 - Title: ${media.title}
-                - Duration: ${media.durationMs}ms
+                - Total Duration: ${media.durationMs}ms (${media.formattedDuration})
                 - Hash: ${media.openSubtitlesHash}
                 
-                Detected Speech Audio Events:
+                Detected Speech Audio Onsets (Across timeline):
                 $speechPreview
                 
-                Subtitle Cues (Currently desynced):
+                Sampled Subtitle Cues (Desynchronized):
                 $cuesPreview
                 
-                Calculate:
-                1. offset_ms: The exact integer millisecond shift to add to subtitle start times (negative if subtitle is too late and needs to shift left, positive if too early).
-                2. drift_factor: The speed scaling ratio (1.000 for no drift, 0.95904 for 25fps->23.976fps drift, 1.0427 for 23.976fps->25fps).
-                3. confidence_percent: Confidence rating (0 to 100).
-                4. explanation: 1-2 sentence explanation of the detected desync pattern (e.g. constant offset, frame rate mismatch, dialogue lead time).
+                Tasks:
+                1. Calculate the baseline timing offset in milliseconds (offset_ms): positive if subtitle needs to be shifted later, negative if earlier.
+                2. Calculate the frame rate drift factor (drift_factor): 1.0 for no progressive drift, or e.g. 0.95904 for PAL 25fps to Film 23.976fps drift across ${durationMinutes} minutes.
+                3. Provide 1-sentence technical explanation.
                 
                 Return ONLY a valid JSON object matching:
                 {
                   "offset_ms": -2500,
                   "drift_factor": 1.0,
-                  "confidence_percent": 98,
-                  "explanation": "Detected a uniform delay of +2,500ms across dialogue cues with 24fps alignment."
+                  "confidence_percent": 96,
+                  "explanation": "Detected uniform latency of -2500ms between audio speech onsets and subtitle cues."
                 }
             """.trimIndent()
 
@@ -83,9 +118,7 @@ class GeminiSubtitleService {
                 val contents = JSONArray().apply {
                     put(JSONObject().apply {
                         put("parts", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("text", prompt)
-                            })
+                            put(JSONObject().apply { put("text", prompt) })
                         })
                     })
                 }
@@ -106,7 +139,7 @@ class GeminiSubtitleService {
             if (!response.isSuccessful) {
                 val errorBody = response.body?.string().orEmpty()
                 Log.e("GeminiSubtitleService", "API error: ${response.code} $errorBody")
-                return@withContext Result.failure(Exception("Gemini API error ${response.code}: $errorBody"))
+                return@withContext Result.failure(Exception("Gemini error ${response.code}: $errorBody"))
             }
 
             val responseBody = response.body?.string().orEmpty()
@@ -120,98 +153,10 @@ class GeminiSubtitleService {
             val parsedJson = JSONObject(rawJsonText)
             val offsetMs = parsedJson.optLong("offset_ms", 0L)
             val drift = parsedJson.optDouble("drift_factor", 1.0)
-            val conf = parsedJson.optInt("confidence_percent", 90).toFloat() / 100f
-            val explanation = parsedJson.optString("explanation", "AI analyzed speech cadence and dialogue alignment.")
 
-            Result.success(
-                SyncResult(
-                    detectedOffsetMs = offsetMs,
-                    driftFactor = drift,
-                    confidenceScore = conf,
-                    method = SyncMethod.AI_GEMINI,
-                    explanation = explanation,
-                    matchedTitle = media.title,
-                    cuesAdjusted = subtitle.cueCount
-                )
-            )
+            Result.success(Pair(offsetMs, drift))
         } catch (e: Exception) {
             Log.e("GeminiSubtitleService", "Failure in AI synchronization", e)
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Refines subtitle text captions using Gemini (fixes capitalization, punctuation, removes hallucinations).
-     */
-    suspend fun refineSubtitles(cues: List<SubtitleCue>): Result<List<SubtitleCue>> = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
-            return@withContext Result.failure(IllegalStateException("No valid GEMINI_API_KEY"))
-        }
-
-        try {
-            val cuesArray = JSONArray()
-            cues.take(15).forEach {
-                cuesArray.put(JSONObject().apply {
-                    put("id", it.id)
-                    put("text", it.text)
-                })
-            }
-
-            val prompt = """
-                Refine the following subtitle dialogue lines for cinema caption readability:
-                - Fix capitalization and punctuation
-                - Clean up transcription errors
-                - Keep cue ids exact
-                
-                Input:
-                $cuesArray
-                
-                Return JSON array of { "id": number, "text": "cleaned text" }.
-            """.trimIndent()
-
-            val requestJson = JSONObject().apply {
-                val contents = JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply { put("text", prompt) })
-                        })
-                    })
-                }
-                put("contents", contents)
-                put("generationConfig", JSONObject().apply {
-                    put("responseMimeType", "application/json")
-                })
-            }
-
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
-            val request = Request.Builder()
-                .url(url)
-                .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = client.newCall(request).execute()
-            val responseBody = response.body?.string().orEmpty()
-            val root = JSONObject(responseBody)
-            val rawJsonText = root.optJSONArray("candidates")?.optJSONObject(0)
-                ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)?.optString("text").orEmpty()
-
-            val array = JSONArray(rawJsonText)
-            val updatedMap = mutableMapOf<Int, String>()
-            for (i in 0 until array.length()) {
-                val item = array.getJSONObject(i)
-                updatedMap[item.getInt("id")] = item.getString("text")
-            }
-
-            val refined = cues.map { cue ->
-                if (updatedMap.containsKey(cue.id)) {
-                    cue.copy(text = updatedMap[cue.id]!!)
-                } else {
-                    cue
-                }
-            }
-            Result.success(refined)
-        } catch (e: Exception) {
             Result.failure(e)
         }
     }

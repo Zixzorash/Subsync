@@ -68,9 +68,14 @@ data class MediaItemInfo(
     val formattedDuration: String
         get() {
             val totalSec = durationMs / 1000
-            val min = totalSec / 60
+            val hr = totalSec / 3600
+            val min = (totalSec % 3600) / 60
             val sec = totalSec % 60
-            return String.format(Locale.US, "%02d:%02d", min, sec)
+            return if (hr > 0) {
+                String.format(Locale.US, "%02d:%02d:%02d", hr, min, sec)
+            } else {
+                String.format(Locale.US, "%02d:%02d", min, sec)
+            }
         }
 
     val formattedSize: String
@@ -80,10 +85,25 @@ data class MediaItemInfo(
         }
 }
 
+data class AdjustedCueDetail(
+    val cueId: Int,
+    val originalStartMs: Long,
+    val originalEndMs: Long,
+    val adjustedStartMs: Long,
+    val adjustedEndMs: Long,
+    val deltaMs: Long,
+    val text: String,
+    val reason: String
+) {
+    fun formatOriginalStart(): String = SubtitleCue.formatTimestamp(originalStartMs)
+    fun formatAdjustedStart(): String = SubtitleCue.formatTimestamp(adjustedStartMs)
+}
+
 enum class SyncMethod(val displayName: String) {
     AUDIO_HASH("MovieHash Registry"),
     FUZZY_SPEECH("Fuzzy Speech Match"),
     AI_GEMINI("Gemini AI Auto-Sync"),
+    SELECTIVE_CUE("Selective AI Alignment"),
     ONLINE_DATABASE("Online Database Sync"),
     MANUAL("Manual Calibration")
 }
@@ -95,7 +115,9 @@ data class SyncResult(
     val method: SyncMethod,
     val explanation: String,
     val matchedTitle: String? = null,
+    val totalCues: Int = 0,
     val cuesAdjusted: Int = 0,
+    val adjustedCueDetails: List<AdjustedCueDetail> = emptyList(),
     val timestamp: Long = System.currentTimeMillis()
 )
 

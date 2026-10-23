@@ -143,6 +143,58 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun testSelectiveCueAlignmentPreservesInSyncCues() {
+        val cueInSync = SubtitleCue(1, 5000L, 8000L, "This line is already perfectly aligned")
+        val cueOutOfSync = SubtitleCue(2, 20000L, 23000L, "This line is late by 2 seconds")
+        val cues = listOf(cueInSync, cueOutOfSync)
+
+        // Audio has voice events at 5050ms (within 180ms tolerance of cue 1) and 18000ms (cue 2 onset)
+        val speechEvents = listOf(
+            AudioDialogueEvent(approximateTimeMs = 5050L, recognizedPhrase = "This line is already perfectly aligned"),
+            AudioDialogueEvent(approximateTimeMs = 18000L, recognizedPhrase = "This line is late by 2 seconds")
+        )
+
+        val output = com.example.subsync.util.SelectiveCueSyncEngine.synchronizeSelective(
+            cues = cues,
+            speechEvents = speechEvents,
+            toleranceMs = 180L
+        )
+
+        assertEquals("Total cues should be 2", 2, output.totalCues)
+        assertEquals("Only 1 cue should be adjusted", 1, output.adjustedCount)
+        assertEquals("1 cue should remain completely unchanged", 1, output.unchangedCount)
+
+        // Cue 1 must be preserved intact
+        val resultCue1 = output.synchronizedCues.first { it.id == 1 }
+        assertEquals("Cue 1 start must remain untouched at 5000ms", 5000L, resultCue1.startTimeMs)
+        assertEquals("Cue 1 end must remain untouched at 8000ms", 8000L, resultCue1.endTimeMs)
+
+        // Cue 2 must be selectively adjusted to match speech onset
+        val resultCue2 = output.synchronizedCues.first { it.id == 2 }
+        assertEquals("Cue 2 should be adjusted to speech onset at 18000ms", 18000L, resultCue2.startTimeMs)
+
+        // Verify details list has 1 item for cue 2
+        assertEquals(1, output.adjustedDetails.size)
+        assertEquals(2, output.adjustedDetails[0].cueId)
+        assertEquals(-2000L, output.adjustedDetails[0].deltaMs)
+    }
+
+    @Test
+    fun testTwoHourDurationFormatting() {
+        // 2 hours exact (7,200,000 ms)
+        val twoHourMedia = MediaItemInfo(title = "Movie.mp3", durationMs = 7200000L)
+        assertEquals("02:00:00", twoHourMedia.formattedDuration)
+
+        // 2 hours, 14 minutes, 32 seconds
+        val longMedia = MediaItemInfo(title = "MovieLong.mp3", durationMs = 8072000L)
+        assertEquals("02:14:32", longMedia.formattedDuration)
+
+        // 1 minute 5 seconds (under 1 hour)
+        val shortMedia = MediaItemInfo(title = "Short.mp3", durationMs = 65000L)
+        assertEquals("01:05", shortMedia.formattedDuration)
+    }
+
+    @Test
     fun testOpenSubtitlesChecksum() {
         val testBytes = ByteArray(100) { (it % 10).toByte() }
         val hash = OpenSubtitlesHasher.computeBytesHash(testBytes, testBytes.size.toLong())

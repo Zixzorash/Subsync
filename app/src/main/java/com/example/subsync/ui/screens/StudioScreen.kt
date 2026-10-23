@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,33 +23,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -72,7 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.subsync.data.sample.SampleMediaProvider
+import androidx.compose.ui.window.Dialog
+import com.example.subsync.model.AdjustedCueDetail
 import com.example.subsync.model.HashMatchType
 import com.example.subsync.model.OnlineSubtitleMatch
 import com.example.subsync.model.OnlineSubtitleSource
@@ -89,6 +91,7 @@ import com.example.subsync.ui.theme.TextPrimary
 import com.example.subsync.ui.theme.TextSecondary
 import com.example.subsync.ui.viewmodel.SubSyncViewModel
 import com.example.subsync.ui.viewmodel.SyncUiState
+import java.util.Locale
 
 @Composable
 fun StudioScreen(
@@ -102,19 +105,25 @@ fun StudioScreen(
     val lastSyncResult by viewModel.lastSyncResult.collectAsState()
     val onlineResults by viewModel.onlineSearchResults.collectAsState()
     val isSearchingOnline by viewModel.isSearchingOnline.collectAsState()
+    val userApiKey by viewModel.userApiKey.collectAsState()
 
     var showOnlineSearchCard by remember { mutableStateOf(false) }
+    var showAdjustedCuesDialog by remember { mutableStateOf(false) }
+    var showApiKeyDialog by remember { mutableStateOf(false) }
+
     var searchQuery by remember { mutableStateOf("") }
     var selectedLanguage by remember { mutableStateOf("All") }
     var selectedSource by remember { mutableStateOf<OnlineSubtitleSource?>(null) }
     var selectedFormat by remember { mutableStateOf<SubtitleFormat?>(null) }
 
-    // File pickers (supports SRT, VTT, ASS)
+    // File pickers (supports MP3, M4A, WAV, MP4, MKV and SRT, VTT, ASS)
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            viewModel.loadCustomMedia(uri, uri.lastPathSegment ?: "Custom_Media", false)
+            val fileName = uri.lastPathSegment?.split("/")?.lastOrNull() ?: "Imported_Media"
+            val isVideo = fileName.endsWith(".mp4", ignoreCase = true) || fileName.endsWith(".mkv", ignoreCase = true)
+            viewModel.loadCustomMedia(uri, fileName, isVideo)
         }
     }
 
@@ -122,7 +131,8 @@ fun StudioScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            viewModel.loadCustomSubtitle(uri, uri.lastPathSegment ?: "Custom_Subtitle")
+            val fileName = uri.lastPathSegment?.split("/")?.lastOrNull() ?: "Imported_Subtitle"
+            viewModel.loadCustomSubtitle(uri, fileName)
         }
     }
 
@@ -133,64 +143,76 @@ fun StudioScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = PaddingValues(top = 12.dp, bottom = 32.dp)
     ) {
-        // Sample Preset Selector Chips
+        // AI Key Status & Mode Banner
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "SAMPLE PRESETS (1-TAP TEST)",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = NeonCyan,
-                    letterSpacing = 1.sp
-                )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(SampleMediaProvider.ALL_PRESETS) { preset ->
-                        val isSelected = selectedMedia?.openSubtitlesHash == preset.media.openSubtitlesHash
-                        FilterChip(
-                            selected = isSelected,
-                            onClick = {
-                                viewModel.loadPreset(preset)
-                                searchQuery = preset.media.title.split(":").first()
-                            },
-                            label = {
-                                Text(
-                                    text = "${preset.media.title.split(":").first()} [${preset.unsyncedSubtitle.format.name}]",
-                                    fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = if (preset.media.isVideo) Icons.Default.Movie else Icons.Default.Audiotrack,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = ElectricIndigo.copy(alpha = 0.25f),
-                                selectedLabelColor = NeonCyan,
-                                selectedLeadingIconColor = NeonCyan,
-                                containerColor = DarkSurface,
-                                labelColor = TextSecondary
-                            ),
-                            border = FilterChipDefaults.filterChipBorder(
-                                enabled = true,
-                                selected = isSelected,
-                                borderColor = if (isSelected) NeonCyan else DarkBorder
+            Card(
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = if (userApiKey.isNotBlank()) NeonCyan else Color(0xFFF59E0B),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Gemini AI Engine",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
                             )
+                            Text(
+                                text = if (userApiKey.isNotBlank()) "Real Gemini 3.5 Flash Active" else "Offline Selective Sync (API Key optional)",
+                                fontSize = 10.sp,
+                                color = if (userApiKey.isNotBlank()) EmeraldSuccess else Color(0xFFF59E0B)
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { showApiKeyDialog = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("gemini_api_key_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = null,
+                            modifier = Modifier.size(13.dp),
+                            tint = NeonCyan
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (userApiKey.isNotBlank()) "Key Configured" else "Set Key",
+                            fontSize = 11.sp,
+                            color = NeonCyan
                         )
                     }
                 }
             }
         }
 
-        // Media & Hash Card
+        // Media Stream & MovieHash Card
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (selectedMedia != null) NeonCyan.copy(alpha = 0.4f) else DarkBorder),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().testTag("media_stream_card")
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -210,82 +232,118 @@ fun StudioScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Media Stream & Hash",
+                                text = "Audio / Video Stream",
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 15.sp,
                                 color = TextPrimary
                             )
                         }
 
-                        OutlinedButton(
+                        Button(
                             onClick = { mediaPickerLauncher.launch("*/*") },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF090D16)),
                             modifier = Modifier.testTag("pick_media_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.UploadFile,
                                 contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = NeonCyan
+                                modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Import File", fontSize = 12.sp, color = NeonCyan)
+                            Text("Import Media", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    Text(
-                        text = selectedMedia?.title ?: "No media selected",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = TextPrimary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (selectedMedia != null) {
+                        val media = selectedMedia!!
+                        Text(
+                            text = media.title,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = TextPrimary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Surface(
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(10.dp),
-                            color = DarkSurfaceVariant
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Fingerprint,
-                                        contentDescription = null,
-                                        tint = NeonCyan,
-                                        modifier = Modifier.size(13.dp)
+                            Surface(
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                color = DarkSurfaceVariant
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Fingerprint,
+                                            contentDescription = null,
+                                            tint = NeonCyan,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("OpenSubtitles Hash", fontSize = 10.sp, color = TextSecondary)
+                                    }
+                                    Text(
+                                        text = media.openSubtitlesHash,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = NeonCyan,
+                                        maxLines = 1
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("MovieHash (OpenSubtitles)", fontSize = 10.sp, color = TextSecondary)
                                 }
-                                Text(
-                                    text = selectedMedia?.openSubtitlesHash ?: "----",
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = NeonCyan,
-                                    maxLines = 1
-                                )
+                            }
+
+                            Surface(
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                color = DarkSurfaceVariant
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text("Duration / Format", fontSize = 10.sp, color = TextSecondary)
+                                    Text(
+                                        text = "${media.formattedDuration} • ${media.sampleRateHz}Hz",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = EmeraldSuccess
+                                    )
+                                }
                             }
                         }
-
-                        Surface(
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(10.dp),
-                            color = DarkSurfaceVariant
+                    } else {
+                        // Empty State for Media
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkSurfaceVariant)
+                                .clickable { mediaPickerLauncher.launch("*/*") }
+                                .padding(vertical = 20.dp, horizontal = 16.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text("Duration / Format", fontSize = 10.sp, color = TextSecondary)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.UploadFile,
+                                    contentDescription = null,
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(28.dp)
+                                )
                                 Text(
-                                    text = "${selectedMedia?.formattedDuration} • ${selectedMedia?.sampleRateHz}Hz",
+                                    text = "Tap to choose audio (MP3, WAV, M4A) or video",
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = TextPrimary
+                                    color = TextSecondary
+                                )
+                                Text(
+                                    text = "Full multi-hour timelines are automatically analyzed",
+                                    fontSize = 10.sp,
+                                    color = NeonCyan
                                 )
                             }
                         }
@@ -294,13 +352,13 @@ fun StudioScreen(
             }
         }
 
-        // Subtitle Status Card with Format Badges (SRT / VTT / ASS)
+        // Target Subtitle Card with Format Badges (SRT / VTT / ASS)
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (activeSubtitle != null) ElectricIndigo.copy(alpha = 0.5f) else DarkBorder),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().testTag("subtitle_stream_card")
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -347,10 +405,10 @@ fun StudioScreen(
                                     modifier = Modifier.size(13.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Search Online", fontSize = 11.sp)
+                                Text("Online", fontSize = 11.sp)
                             }
 
-                            // Import Local File Button (SRT, VTT, ASS)
+                            // Import Local Subtitle File (SRT, VTT, ASS)
                             OutlinedButton(
                                 onClick = { subtitlePickerLauncher.launch("*/*") },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
@@ -361,78 +419,114 @@ fun StudioScreen(
                                     imageVector = Icons.Default.UploadFile,
                                     contentDescription = null,
                                     modifier = Modifier.size(13.dp),
-                                    tint = TextSecondary
+                                    tint = NeonCyan
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Import File", fontSize = 11.sp, color = TextPrimary)
+                                Text("Import", fontSize = 11.sp, color = NeonCyan)
                             }
                         }
                     }
 
-                    Text(
-                        text = activeSubtitle?.title ?: "No subtitle loaded",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = TextPrimary
-                    )
+                    if (activeSubtitle != null) {
+                        val sub = activeSubtitle!!
+                        Text(
+                            text = sub.title,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = TextPrimary
+                        )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Format Badge (SRT / VTT / ASS)
-                        val formatName = activeSubtitle?.format?.name ?: "SRT"
-                        val formatColor = when (activeSubtitle?.format) {
-                            SubtitleFormat.ASS -> Color(0xFFA855F7) // Purple for ASS
-                            SubtitleFormat.VTT -> Color(0xFF10B981) // Emerald for VTT
-                            else -> NeonCyan // Cyan for SRT
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = formatColor.copy(alpha = 0.2f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, formatColor.copy(alpha = 0.6f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = formatName,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = formatColor,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
+                            // Format Badge (SRT / VTT / ASS)
+                            val formatColor = when (sub.format) {
+                                SubtitleFormat.ASS -> Color(0xFFA855F7)
+                                SubtitleFormat.VTT -> Color(0xFF10B981)
+                                else -> NeonCyan
+                            }
 
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color(0xFF334155))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "${activeSubtitle?.cueCount ?: 0} Cues",
-                                fontSize = 11.sp,
-                                color = TextPrimary
-                            )
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(
-                                    if (activeSubtitle?.appliedOffsetMs != 0L) EmeraldSuccess.copy(alpha = 0.2f)
-                                    else Color(0xFFF59E0B).copy(alpha = 0.2f)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = formatColor.copy(alpha = 0.2f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, formatColor.copy(alpha = 0.6f))
+                            ) {
+                                Text(
+                                    text = sub.format.name,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = formatColor,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF334155))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "${sub.cueCount} Total Cues",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        if (sub.appliedOffsetMs != 0L || lastSyncResult != null) EmeraldSuccess.copy(alpha = 0.2f)
+                                        else Color(0xFFF59E0B).copy(alpha = 0.2f)
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = if (lastSyncResult != null) "Synchronized"
+                                    else if (sub.appliedOffsetMs != 0L) "Calibrated (${sub.appliedOffsetMs}ms)"
+                                    else "Raw (Desynced)",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (lastSyncResult != null || sub.appliedOffsetMs != 0L) EmeraldSuccess else Color(0xFFF59E0B)
+                                )
+                            }
+                        }
+                    } else {
+                        // Empty State for Subtitle
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkSurfaceVariant)
+                                .clickable { subtitlePickerLauncher.launch("*/*") }
+                                .padding(vertical = 20.dp, horizontal = 16.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = if (activeSubtitle?.appliedOffsetMs != 0L)
-                                    "Calibrated (${activeSubtitle?.appliedOffsetMs}ms)"
-                                else "Desynced (Raw)",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (activeSubtitle?.appliedOffsetMs != 0L) EmeraldSuccess else Color(0xFFF59E0B)
-                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Description,
+                                    contentDescription = null,
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                                Text(
+                                    text = "Import SRT, VTT, or ASS subtitle file",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                                Text(
+                                    text = "Or tap 'Online' to auto-fetch from OpenSubtitles / Subscene",
+                                    fontSize = 10.sp,
+                                    color = ElectricIndigo
+                                )
+                            }
                         }
                     }
                 }
@@ -500,7 +594,7 @@ fun StudioScreen(
                                 onValueChange = { searchQuery = it },
                                 placeholder = {
                                     Text(
-                                        text = selectedMedia?.title?.split(":")?.firstOrNull() ?: "Search subtitle...",
+                                        text = selectedMedia?.title?.split(".")?.firstOrNull() ?: "Search by title or release...",
                                         fontSize = 12.sp,
                                         color = TextSecondary
                                     )
@@ -576,7 +670,7 @@ fun StudioScreen(
                             }
                         }
 
-                        // Filter Chips: Format (SRT, VTT, ASS)
+                        // Filter Chips: Format (All, SRT, VTT, ASS)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -585,10 +679,6 @@ fun StudioScreen(
                                 selectedFormat = null
                                 viewModel.searchOnlineSubtitles(searchQuery, selectedLanguage, selectedSource, null)
                             }
-                            FormatFilterChip("ASS", selectedFormat == SubtitleFormat.ASS) {
-                                selectedFormat = SubtitleFormat.ASS
-                                viewModel.searchOnlineSubtitles(searchQuery, selectedLanguage, selectedSource, SubtitleFormat.ASS)
-                            }
                             FormatFilterChip("SRT", selectedFormat == SubtitleFormat.SRT) {
                                 selectedFormat = SubtitleFormat.SRT
                                 viewModel.searchOnlineSubtitles(searchQuery, selectedLanguage, selectedSource, SubtitleFormat.SRT)
@@ -596,6 +686,10 @@ fun StudioScreen(
                             FormatFilterChip("VTT", selectedFormat == SubtitleFormat.VTT) {
                                 selectedFormat = SubtitleFormat.VTT
                                 viewModel.searchOnlineSubtitles(searchQuery, selectedLanguage, selectedSource, SubtitleFormat.VTT)
+                            }
+                            FormatFilterChip("ASS", selectedFormat == SubtitleFormat.ASS) {
+                                selectedFormat = SubtitleFormat.ASS
+                                viewModel.searchOnlineSubtitles(searchQuery, selectedLanguage, selectedSource, SubtitleFormat.ASS)
                             }
                         }
 
@@ -635,7 +729,7 @@ fun StudioScreen(
             }
         }
 
-        // Primary Synchronization Actions (AI Auto-Sync & Fuzzy Hash)
+        // Primary Synchronization Actions
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 // AI Auto-Sync Button
@@ -649,7 +743,8 @@ fun StudioScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = NeonCyan,
                         contentColor = Color(0xFF090D16)
-                    )
+                    ),
+                    enabled = syncState !is SyncUiState.Processing
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
@@ -658,13 +753,13 @@ fun StudioScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "AI Auto-Synchronize (Gemini)",
+                        text = "AI Selective Auto-Sync (Gemini)",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                // Offline Fuzzy Sync Button
+                // Offline Selective Fuzzy Sync Button
                 OutlinedButton(
                     onClick = { viewModel.performFuzzySync() },
                     modifier = Modifier
@@ -672,7 +767,8 @@ fun StudioScreen(
                         .height(48.dp)
                         .testTag("fuzzy_sync_button"),
                     shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricIndigo)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricIndigo),
+                    enabled = syncState !is SyncUiState.Processing
                 ) {
                     Icon(
                         imageVector = Icons.Default.Sync,
@@ -682,7 +778,7 @@ fun StudioScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Fuzzy Hash & Speech Consensus",
+                        text = "Selective Speech Consensus (Offline)",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = ElectricIndigo
@@ -691,7 +787,7 @@ fun StudioScreen(
             }
         }
 
-        // Processing indicator
+        // Processing Progress indicator
         item {
             AnimatedVisibility(
                 visible = syncState is SyncUiState.Processing,
@@ -737,7 +833,7 @@ fun StudioScreen(
             }
         }
 
-        // Sync Results Card
+        // Detailed Sync Results Card
         item {
             AnimatedVisibility(
                 visible = lastSyncResult != null,
@@ -769,7 +865,7 @@ fun StudioScreen(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Synchronization Complete",
+                                        text = "Selective Sync Complete",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 15.sp,
                                         color = TextPrimary
@@ -790,6 +886,7 @@ fun StudioScreen(
                                 }
                             }
 
+                            // Metrics: Adjusted Cues count & Baseline offset
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -800,12 +897,17 @@ fun StudioScreen(
                                     color = DarkSurface
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
-                                        Text("Calibrated Offset", fontSize = 11.sp, color = TextSecondary)
+                                        Text("Cues Adjusted", fontSize = 11.sp, color = TextSecondary)
                                         Text(
-                                            text = "${if (result.detectedOffsetMs > 0) "+" else ""}${result.detectedOffsetMs} ms",
-                                            fontSize = 18.sp,
+                                            text = "${result.cuesAdjusted} / ${result.totalCues}",
+                                            fontSize = 17.sp,
                                             fontWeight = FontWeight.Black,
-                                            color = if (result.detectedOffsetMs != 0L) NeonCyan else EmeraldSuccess
+                                            color = NeonCyan
+                                        )
+                                        Text(
+                                            text = "${result.totalCues - result.cuesAdjusted} already in sync",
+                                            fontSize = 10.sp,
+                                            color = EmeraldSuccess
                                         )
                                     }
                                 }
@@ -816,12 +918,17 @@ fun StudioScreen(
                                     color = DarkSurface
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
-                                        Text("Speed / Drift", fontSize = 11.sp, color = TextSecondary)
+                                        Text("Reference Shift / Drift", fontSize = 11.sp, color = TextSecondary)
                                         Text(
-                                            text = "${String.format(java.util.Locale.US, "%.3f", result.driftFactor)}x",
-                                            fontSize = 18.sp,
+                                            text = "${if (result.detectedOffsetMs > 0) "+" else ""}${result.detectedOffsetMs} ms",
+                                            fontSize = 17.sp,
                                             fontWeight = FontWeight.Black,
                                             color = TextPrimary
+                                        )
+                                        Text(
+                                            text = "Drift: ${String.format(Locale.US, "%.4f", result.driftFactor)}x",
+                                            fontSize = 10.sp,
+                                            color = TextSecondary
                                         )
                                     }
                                 }
@@ -832,26 +939,53 @@ fun StudioScreen(
                                 methodName = result.explanation
                             )
 
-                            Button(
-                                onClick = onNavigateToPlayer,
-                                modifier = Modifier.fillMaxWidth().testTag("launch_player_button"),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = ElectricIndigo,
-                                    contentColor = Color.White
-                                )
+                            // Action buttons: Inspect Adjusted Cues + Preview
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Preview In Live Sync Player",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp
-                                )
+                                OutlinedButton(
+                                    onClick = { showAdjustedCuesDialog = true },
+                                    modifier = Modifier.weight(1f).height(46.dp).testTag("inspect_cues_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ListAlt,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = NeonCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "View ${result.cuesAdjusted} Cues",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = NeonCyan
+                                    )
+                                }
+
+                                Button(
+                                    onClick = onNavigateToPlayer,
+                                    modifier = Modifier.weight(1f).height(46.dp).testTag("launch_player_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = ElectricIndigo,
+                                        contentColor = Color.White
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Play Live",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
                             }
                         }
                     }
@@ -859,6 +993,279 @@ fun StudioScreen(
             }
         }
     }
+
+    // Modal: Inspect Adjusted Cues
+    if (showAdjustedCuesDialog && lastSyncResult != null) {
+        AdjustedCuesDialog(
+            result = lastSyncResult!!,
+            onDismiss = { showAdjustedCuesDialog = false }
+        )
+    }
+
+    // Modal: Gemini API Key Configuration
+    if (showApiKeyDialog) {
+        GeminiApiKeyDialog(
+            currentKey = userApiKey,
+            onSave = { newKey ->
+                viewModel.saveApiKey(newKey)
+                showApiKeyDialog = false
+            },
+            onDismiss = { showApiKeyDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun AdjustedCuesDialog(
+    result: SyncResult,
+    onDismiss: () -> Unit
+) {
+    var searchFilter by remember { mutableStateOf("") }
+    val filteredCues = remember(result.adjustedCueDetails, searchFilter) {
+        if (searchFilter.isBlank()) {
+            result.adjustedCueDetails
+        } else {
+            result.adjustedCueDetails.filter {
+                it.cueId.toString().contains(searchFilter) ||
+                        it.text.contains(searchFilter, ignoreCase = true)
+            }
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(18.dp),
+            color = DarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.5f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Adjusted Cues Report",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "${result.cuesAdjusted} of ${result.totalCues} modified • ${result.totalCues - result.cuesAdjusted} preserved",
+                            fontSize = 11.sp,
+                            color = NeonCyan
+                        )
+                    }
+
+                    IconButton(onClick = onDismiss) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                // Filter search
+                OutlinedTextField(
+                    value = searchFilter,
+                    onValueChange = { searchFilter = it },
+                    placeholder = { Text("Filter by cue # or text...", fontSize = 12.sp, color = TextSecondary) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = NeonCyan,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    )
+                )
+
+                // List of adjusted cues
+                if (filteredCues.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (result.cuesAdjusted == 0) "All cues are already perfectly in sync with speech!"
+                            else "No cues match filter.",
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredCues) { cue ->
+                            AdjustedCueItemCard(cue = cue)
+                        }
+                    }
+                }
+
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF090D16)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Close Report", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdjustedCueItemCard(cue: AdjustedCueDetail) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Cue #${cue.cueId}",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = NeonCyan
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = if (cue.deltaMs > 0) Color(0xFF3B82F6).copy(alpha = 0.25f) else Color(0xFFEF4444).copy(alpha = 0.25f)
+                ) {
+                    Text(
+                        text = "${if (cue.deltaMs > 0) "+" else ""}${cue.deltaMs} ms",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (cue.deltaMs > 0) Color(0xFF60A5FA) else Color(0xFFF87171),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Timestamps transition
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Before: ${cue.formatOriginalStart()}",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = TextSecondary
+                )
+                Text(
+                    text = "→ After: ${cue.formatAdjustedStart()}",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = EmeraldSuccess
+                )
+            }
+
+            // Subtitle text
+            Text(
+                text = cue.text,
+                fontSize = 12.sp,
+                color = TextPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Text(
+                text = cue.reason,
+                fontSize = 10.sp,
+                color = TextSecondary
+            )
+        }
+    }
+}
+
+@Composable
+private fun GeminiApiKeyDialog(
+    currentKey: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var keyInput by remember { mutableStateOf(currentKey) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Gemini API Configuration",
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+                color = TextPrimary
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Enter your Google AI Studio Gemini API key to run real Gemini 3.5 Flash synchronization across multi-hour audio/video files.",
+                    fontSize = 12.sp,
+                    color = TextSecondary
+                )
+
+                OutlinedTextField(
+                    value = keyInput,
+                    onValueChange = { keyInput = it },
+                    placeholder = { Text("AIzaSy...", fontSize = 12.sp, color = TextSecondary) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = NeonCyan,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    )
+                )
+
+                Text(
+                    text = "Key is securely stored in local device storage.",
+                    fontSize = 11.sp,
+                    color = NeonCyan
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(keyInput) },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF090D16))
+            ) {
+                Text("Save Key", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary)
+            }
+        },
+        containerColor = DarkSurface,
+        shape = RoundedCornerShape(16.dp)
+    )
 }
 
 @Composable
